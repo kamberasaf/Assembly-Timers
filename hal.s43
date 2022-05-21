@@ -1,0 +1,320 @@
+#include "bsp.h"
+;-------------------------------------------------------------------------------
+; already in use: R4,R5,R6,R7,R8,R9,R11,R12,R13,R14,R15 ... R10= freq result
+
+
+LCD_cmd     MACRO command
+            push.w  #1750
+            call  #Delay     ;5ms delay
+            MOV.B command,LCData
+            CALL  #LCD_strobe 
+            ENDM
+
+LCD_data     MACRO   CHAR
+             push.w  #1750
+             call    #Delay      ;5ms delay
+             mov.b   #0x00,LCData
+             bis.b   #0x40,LCDCtrl   ;RS=1, P2.6
+             mov.b   CHAR,LCData
+             call    #LCD_strobe
+             bic.b   #0x40,LCDCtrl  ;RS=0, P2.6
+             ENDM
+             
+DIV16bit MACRO Divided,Divisor,Quontient,Remainder
+         LOCAL L1,L2,L3
+         mov #17,R9
+         clr R8
+         mov.w Divided,R4
+         clr R5
+         mov.w Divisor,R6
+L3       rla R8
+L1       dec R9
+         jz L2
+         rla R4
+         rlc R5
+         cmp R6,R5
+         jlo L3
+         sub R6,R5
+         setc
+         rlc R8
+         jmp L1
+L2       mov.w R8,Quontient
+         mov.w R5,Remainder
+         ENDM
+
+;------------------------------------------------------------------------------
+             MODULE HAL
+             EXTERN GPIOconfig,state,Flag,onesecdelay,Stop_Timer_A1,Stop_Timer_A0
+             PUBLIC SysConfig,PORT2_ISR,Delay,NewCount
+             PUBLIC StartCount,LCD_START
+             PUBLIC task2_title,print_freq,TIMER1_ISR
+             PUBLIC calculate_freq,clearLCD,cur_units_T2,TIMER0_ISR
+;-------------------------------------------------------------------------------
+             RSEG   CODE    
+sec_num      DW     9+48
+tensecnum    DW     5+48
+nouse        DW     0
+;char         DW     48
+;----------------- System Configuration ----------------------------------------
+SysConfig    call   #GPIOconfig
+             ret
+
+;-------------------------------------------------------------------------------
+;                     Task1 - One Minute Count Tasks
+;-------------------------------------------------------------------------------
+NewCount   
+            call     #FirstRow
+            LCD_data #'0'
+            LCD_data #'1'
+            LCD_data #':'
+            LCD_data #'0'
+            LCD_data #'0'
+            mov.b #'5',R7   ;ten seconds=5
+            mov.b #'9',R6   ;seconds=9
+            ret 
+  
+StartCount  
+            cmp  #1,state
+            jne  exitCount
+            call #onesecdelay
+            call #FirstRow        ; cursor to 1st row
+            LCD_data #'0'
+            LCD_data #'0'
+            LCD_data #':'
+            LCD_data R7
+            LCD_data R6
+            dec R6
+            CMP #47,R6          ; check if units=0 - 00:x0
+            jne  StartCount     ;
+            CMP #48,R7          ;check if get to - 00:00
+            jeq FinishCount
+            add #1,R6
+            call #cursorleft
+            LCD_data R6
+            mov.b #'9',R6   ; seconds=9
+            dec.b R7
+            jmp StartCount
+
+
+FinishCount call #onesecdelay
+            call #cursorleft
+            add  #1,R6
+            LCD_data R6
+            call #onesecdelay
+exitCount   call #clearLCD
+            call #Stop_Timer_A0
+            ret
+            
+            
+;------------------------------------------------------------------------------
+;                              LCD Routines
+;------------------------------------------------------------------------------
+LCD_START 
+            bic.b #0xE0,LCDCtrl   ;RS,R/W,E = 0 R/W=P2.7,RS=P2.6,E=P2.5
+            push  #5250
+            call  #Delay        ; delay 15ms
+            mov.b #0x3F,LCData
+            call  #LCD_strobe
+            push  #1750
+            call  #Delay       ; delay 5ms
+            mov.b #0x3F,LCData
+            call  #LCD_strobe
+            push  #70
+            call  #Delay        ; delay 200u-sec
+            mov.b #0x3F,LCData
+            call  #LCD_strobe
+            LCD_cmd #0x3C
+            LCD_cmd #0x0F
+            LCD_cmd #0x01
+            LCD_cmd #0x06
+            LCD_cmd #0x80
+            LCD_cmd #0x02
+            call #CursorOff  ; just for better viewing
+            ret
+         
+LCD_strobe
+            bis.b #0x20,LCDCtrl  ; E=1, P2.5
+            nop
+            nop
+            bic.b #0x20,LCDCtrl  ;E=0, P2.5
+            ret
+            
+cursorright LCD_cmd #0x14
+            ret
+cursorleft  LCD_cmd #0x10
+            ret
+clearLCD    LCD_cmd #0x01
+            ret
+CursorOff   LCD_cmd #0x0C
+            ret
+FirstRow    LCD_cmd #0x02
+            ret
+SecondRow   LCD_cmd #0xC0
+            ret
+            
+cursor_T1    call #FirstRow               ; not in use
+             call #cursorright
+             ret
+             
+cur_T1_units call #FirstRow              ; not in use
+             call #cursorright
+             call #cursorright
+             call #cursorright
+             call #cursorright
+             ret
+             
+cur_units_T2 call #SecondRow
+             call #cursorright
+             call #cursorright
+             call #cursorright
+             call #cursorright
+             call #cursorright
+             call #cursorright
+             call #cursorright
+             RET
+
+
+task2_title
+            call #LCD_START
+            LCD_data #'M'
+            LCD_data #'e'
+            LCD_data #'a'
+            LCD_data #'s'
+            LCD_data #'u'
+            LCD_data #'r'
+            LCD_data #'e'
+            LCD_data #'d'
+            call     #cursorright
+            LCD_data #'f'
+            LCD_data #'r'
+            LCD_data #'e'
+            LCD_data #'q'
+            LCD_data #'u'
+            LCD_data #'e'
+            LCD_data #'n'
+            call #SecondRow
+            LCD_data #'c'
+            LCD_data #'y'
+            LCD_data #':'
+            call     #cursorright
+            call     #cursorright
+            call     #cursorright
+            call     #cursorright
+            call     #cursorright
+            LCD_data #'['
+            LCD_data #'H'
+            LCD_data #'z'
+            LCD_data #']'
+            call #cursorright  ;move cursor to the start of the number
+            ret
+
+calculate_freq
+               clrc     ; carry=0
+               rrc R10  ; divide N by 2
+               clrc     ; carry=0
+               rrc R10  ; divide N by 2
+               DIV16bit #0x8000, R10,R10,nouse
+               ret
+
+
+print_freq  mov.b      #5,R14               ;5 digit result
+get_nums    DIV16bit   R10,#0x0A,R15,R13   ;R10=RESULT ;divided,divisor,quotient,remainder
+            add.w      #48,R13           ;ASCII digit to print
+            mov.w      R15,R10           ; R10=new number without the right digit            
+            LCD_data   R13
+            call       #cursorleft
+            call       #cursorleft
+            DEC.B      R14             ;run on all 5 digits
+            jnz        get_nums
+            call       #cur_units_T2   ;move cursor back to units
+            ret
+           
+                         
+;-------------------------------------------------------------------------------
+;              Push Buttons ISR
+;-------------------------------------------------------------------------------
+PORT2_ISR    push   #DebounceVal
+             call   #Delay
+             bit.b  #0x01,PBIntFlag   ; check if PB0 was pushed.
+             jnz    LCD
+             bit.b  #0x02,PBIntFlag   ; check if PB1 was pushed.
+             jnz    COUNTER
+             bit.b  #0x10,PBIntFlag   ; check if PB2 was pushed.
+             jnz    PWM
+             reti                     ; different interrupt happend
+             
+LCD          mov    #1,state
+             call   #NewCount
+             jmp    exitLPM0
+             
+COUNTER       cmp    #2,state
+              jeq    getout
+              mov    #2,state
+              jmp    exitLPM0
+              
+PWM          cmp    #3,state
+             jeq    getout
+             mov    #3,state              
+
+exitLPM0     bic    #CPUOFF,0(SP)    ; Wake up CPU
+getout       bic.b  #0x0F,PBIntFlag
+             reti
+             
+             
+;-------------------------------------------------------------------------------
+;                              Timer 0 ISR
+;-------------------------------------------------------------------------------
+
+TIMER0_ISR BIC.B  #CPUOFF,0(SP) ;RETURN FROM SLEEP
+           RETI
+
+;-------------------------------------------------------------------------------
+;                            Timer 1 ISR (Task 2 - Freq. Count)
+;-------------------------------------------------------------------------------
+
+TIMER1_ISR  add    Timer_A1_Flag,PC
+            reti
+            reti
+            jmp    Task2
+            reti
+            reti
+            reti
+            reti
+            reti
+            
+Task2       bic    #CCIE+CCIFG+COV,Timer_A1_CC2_Ctl  ; stop timer capture
+            cmp.b  #0,Flag       
+            jne    cap_2            ; 2nd capture (T1)
+            mov.w  Timer_A1_CC2_Reg,T0     ; T0=1st capture  R11
+            xor.b  #0x01,Flag       ; Flag 0->1
+            bis    #CCIE,Timer_A1_CC2_Ctl  ; continue timer capture
+            reti
+        
+cap_2       mov.w  Timer_A1_CC2_Reg,T1    ; T1=2nd capture  R12
+            mov.w  T1,R10         ; check
+            bic    #CCIE,Timer_A1_CC2_Ctl ; stop timer capture
+            sub    T0,R10         ; T1-T0
+            JN     NEGATIVE       ; if T0>T1 jump
+            jmp    Done_cap       ; Done capture
+
+NEGATIVE    mov   #0xFFFF,R10      ; FFFF+T1-T0
+            sub   T0,R10
+            add   T1,R10           
+Done_cap    call  #Stop_Timer_A1
+            xor.b #0x01,Flag
+            bic   #CPUOFF, 0(SP)
+            reti
+
+
+;-------------------------------------------------------------------------------
+;                              Delay Routines
+;-------------------------------------------------------------------------------
+Delay         pop   R4     ; return address
+              pop   R5     ; delay value
+L             dec.w R5
+              jnz   L
+              push.w  R4
+              ret
+;------------------------------------------------------------------------------
+            ENDMOD
+            END
