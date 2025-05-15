@@ -1,0 +1,396 @@
+;*****************************************************************************
+; File: hal.s43 - Hardware Abstraction Layer for Basic and Advanced Timers Lab
+; Authors: Asaf Kamber, Aviv Primor
+; Course: Introduction to Computers - Lab 5
+; Description: Implements LCD routines, timer ISRs, and utility functions
+;              for the timer applications.
+;*****************************************************************************
+#include "bsp.h"
+;-------------------------------------------------------------------------------
+; already in use: R4,R5,R6,R7,R8,R9,R11,R12,R13,R14,R15 ... R10= freq result
+
+;-------------------------------------------------------------------------------
+; Macro Definitions
+;-------------------------------------------------------------------------------
+; LCD_cmd: Send a command to the LCD
+LCD_cmd     MACRO command
+            push.w  #1750          ; Push delay value (5ms)
+            call  #Delay           ; Call delay function
+            MOV.B command,LCData   ; Send command to LCD data port
+            CALL  #LCD_strobe      ; Strobe the LCD
+            ENDM
+
+; LCD_data: Send data (character) to the LCD
+LCD_data     MACRO   CHAR
+             push.w  #1750         ; Push delay value (5ms)
+             call    #Delay        ; Call delay function
+             mov.b   #0x00,LCData  ; Clear data port
+             bis.b   #0x40,LCDCtrl ; Set RS=1 (data mode) on P2.6
+             mov.b   CHAR,LCData   ; Send character to LCD data port
+             call    #LCD_strobe   ; Strobe the LCD
+             bic.b   #0x40,LCDCtrl ; Clear RS=0 (command mode)
+             ENDM
+             
+; DIV16bit: 16-bit division macro
+DIV16bit MACRO Divided,Divisor,Quontient,Remainder
+         LOCAL L1,L2,L3
+         mov #17,R9               ; Set bit counter
+         clr R8                   ; Clear quotient register
+         mov.w Divided,R4         ; Move dividend to R4
+         clr R5                   ; Clear high word of dividend
+         mov.w Divisor,R6         ; Move divisor to R6
+L3       rla R8                   ; Shift quotient left
+L1       dec R9                   ; Decrement bit counter
+         jz L2                    ; If zero, we're done
+         rla R4                   ; Shift dividend left
+         rlc R5                   ; through both words
+         cmp R6,R5                ; Compare high word with divisor
+         jlo L3                   ; If less, skip subtraction
+         sub R6,R5                ; Subtract divisor
+         setc                     ; Set carry for quotient
+         rlc R8                   ; Shift carry into quotient
+         jmp L1                   ; Continue division
+L2       mov.w R8,Quontient       ; Store quotient
+         mov.w R5,Remainder       ; Store remainder
+         ENDM
+
+;------------------------------------------------------------------------------
+             MODULE HAL
+             EXTERN GPIOconfig,state,Flag,onesecdelay,Stop_Timer_A1,Stop_Timer_A0
+             PUBLIC SysConfig,PORT2_ISR,Delay,NewCount
+             PUBLIC StartCount,LCD_START
+             PUBLIC task2_title,print_freq,TIMER1_ISR
+             PUBLIC calculate_freq,clearLCD,cur_units_T2,TIMER0_ISR
+;-------------------------------------------------------------------------------
+             RSEG   CODE    
+sec_num      DW     9+48           ; Second digit initial value (ASCII '9')
+tensecnum    DW     5+48           ; Ten-second digit initial value (ASCII '5')
+nouse        DW     0              ; Unused variable
+;char         DW     48
+
+;----------------- System Configuration ----------------------------------------
+SysConfig    call   #GPIOconfig    ; Configure GPIO ports
+             ret
+
+;-------------------------------------------------------------------------------
+;                     Task1 - One Minute Count Tasks
+;-------------------------------------------------------------------------------
+; Function: NewCount
+; Description: Initializes the one-minute countdown display on LCD (01:00)
+; Inputs: None
+; Outputs: R7 - Ten-seconds digit (ASCII '5')
+;          R6 - Seconds digit (ASCII '9')
+;-------------------------------------------------------------------------------
+NewCount   
+            call     #FirstRow     ; Position cursor at beginning of first row
+            LCD_data #'0'          ; Display "01:00" as initial value
+            LCD_data #'1'
+            LCD_data #':'
+            LCD_data #'0'
+            LCD_data #'0'
+            mov.b #'5',R7          ; Initialize ten-seconds digit to '5'
+            mov.b #'9',R6          ; Initialize seconds digit to '9'
+            ret 
+
+;-------------------------------------------------------------------------------
+; Function: StartCount
+; Description: Implements the countdown logic and LCD display updating
+; Inputs: R7 - Ten-seconds digit
+;         R6 - Seconds digit
+; Outputs: Updated countdown display
+;-------------------------------------------------------------------------------
+StartCount  
+            cmp  #1,state          ; Check if still in countdown state
+            jne  exitCount         ; If not, exit
+            call #onesecdelay      ; Delay for one second
+            call #FirstRow         ; Position cursor at beginning of first row
+            LCD_data #'0'          ; Display minute values (always "00:" in this implementation)
+            LCD_data #'0'
+            LCD_data #':'
+            LCD_data R7            ; Display ten-seconds digit
+            LCD_data R6            ; Display seconds digit
+            dec R6                 ; Decrement seconds digit
+            CMP #47,R6             ; Check if seconds reached '0' (ASCII 48-1)
+            jne  StartCount        ; If not, continue countdown
+            CMP #48,R7             ; Check if ten-seconds is '0'
+            jeq FinishCount        ; If both are zero, countdown complete
+            add #1,R6              ; Adjust seconds digit 
+            call #cursorleft       ; Move cursor left
+            LCD_data R6            ; Display seconds digit
+            mov.b #'9',R6          ; Reset seconds digit to '9'
+            dec.b R7               ; Decrement ten-seconds digit
+            jmp StartCount         ; Continue countdown
+
+;-------------------------------------------------------------------------------
+; Function: FinishCount
+; Description: Handles the end of countdown and cleanup
+; Inputs: None
+; Outputs: None
+;-------------------------------------------------------------------------------
+FinishCount call #onesecdelay      ; Delay for one second
+            call #cursorleft       ; Move cursor left
+            add  #1,R6             ; Adjust seconds digit
+            LCD_data R6            ; Display final seconds digit (should be '0')
+            call #onesecdelay      ; Delay for one second
+exitCount   call #clearLCD         ; Clear the LCD
+            call #Stop_Timer_A0    ; Stop Timer A used for one-second delays
+            ret
+            
+;------------------------------------------------------------------------------
+;                              LCD Routines
+;------------------------------------------------------------------------------
+; Function: LCD_START
+; Description: Initializes the LCD module with standard configuration
+; Inputs: None
+; Outputs: None
+;-------------------------------------------------------------------------------
+LCD_START 
+            bic.b #0xE0,LCDCtrl    ; Clear RS,R/W,E (P2.5-P2.7)
+            push  #5250
+            call  #Delay           ; Delay 15ms for LCD power-up
+            mov.b #0x3F,LCData     ; Function set command
+            call  #LCD_strobe      ; Strobe the LCD
+            push  #1750
+            call  #Delay           ; Delay 5ms
+            mov.b #0x3F,LCData     ; Function set command again
+            call  #LCD_strobe      ; Strobe the LCD
+            push  #70
+            call  #Delay           ; Delay 200us
+            mov.b #0x3F,LCData     ; Function set command third time
+            call  #LCD_strobe      ; Strobe the LCD
+            LCD_cmd #0x3C          ; Function set: 8-bit, 2 lines, 5x10 dots
+            LCD_cmd #0x0F          ; Display on, cursor on, blink on
+            LCD_cmd #0x01          ; Clear display
+            LCD_cmd #0x06          ; Entry mode: increment, no shift
+            LCD_cmd #0x80          ; Set DDRAM address to 0
+            LCD_cmd #0x02          ; Return home
+            call #CursorOff        ; Turn off cursor for better viewing
+            ret
+         
+;-------------------------------------------------------------------------------
+; Function: LCD_strobe
+; Description: Generates the enable pulse for the LCD
+; Inputs: None
+; Outputs: None
+;-------------------------------------------------------------------------------
+LCD_strobe
+            bis.b #0x20,LCDCtrl    ; Set E=1 (P2.5)
+            nop                    ; Short delay
+            nop
+            bic.b #0x20,LCDCtrl    ; Clear E=0 (P2.5)
+            ret
+            
+;-------------------------------------------------------------------------------
+; LCD Cursor and Display Control Functions
+;-------------------------------------------------------------------------------
+cursorright LCD_cmd #0x14          ; Move cursor right
+            ret
+cursorleft  LCD_cmd #0x10          ; Move cursor left
+            ret
+clearLCD    LCD_cmd #0x01          ; Clear display and return home
+            ret
+CursorOff   LCD_cmd #0x0C          ; Display on, cursor off
+            ret
+FirstRow    LCD_cmd #0x02          ; Return cursor to home position (first row)
+            ret
+SecondRow   LCD_cmd #0xC0          ; Move cursor to start of second row
+            ret
+            
+cursor_T1    call #FirstRow        ; Move to first row (not in use)
+             call #cursorright     ; Move cursor right
+             ret
+             
+cur_T1_units call #FirstRow        ; Move to position for units in task 1 (not in use)
+             call #cursorright
+             call #cursorright
+             call #cursorright
+             call #cursorright
+             ret
+             
+;-------------------------------------------------------------------------------
+; Function: cur_units_T2
+; Description: Positions cursor for frequency display in Task 2
+; Inputs: None
+; Outputs: None
+;-------------------------------------------------------------------------------
+cur_units_T2 call #SecondRow       ; Move to second row
+             call #cursorright     ; Move cursor to position for frequency value display
+             call #cursorright
+             call #cursorright
+             call #cursorright
+             call #cursorright
+             call #cursorright
+             call #cursorright
+             RET
+
+;-------------------------------------------------------------------------------
+; Function: task2_title
+; Description: Displays the title and labels for frequency measurement (Task 2)
+; Inputs: None
+; Outputs: None
+;-------------------------------------------------------------------------------
+task2_title
+            call #LCD_START        ; Initialize LCD
+            LCD_data #'M'          ; Display "Measured frequency"
+            LCD_data #'e'
+            LCD_data #'a'
+            LCD_data #'s'
+            LCD_data #'u'
+            LCD_data #'r'
+            LCD_data #'e'
+            LCD_data #'d'
+            call     #cursorright
+            LCD_data #'f'
+            LCD_data #'r'
+            LCD_data #'e'
+            LCD_data #'q'
+            LCD_data #'u'
+            LCD_data #'e'
+            LCD_data #'n'
+            call #SecondRow        ; Move to second row
+            LCD_data #'c'
+            LCD_data #'y'
+            LCD_data #':'
+            call     #cursorright  ; Position for frequency value
+            call     #cursorright
+            call     #cursorright
+            call     #cursorright
+            call     #cursorright
+            LCD_data #'['          ; Display units "[Hz]"
+            LCD_data #'H'
+            LCD_data #'z'
+            LCD_data #']'
+            call #cursorright      ; Move cursor to the start of the number
+            ret
+
+;-------------------------------------------------------------------------------
+; Function: calculate_freq
+; Description: Calculates frequency from timer captures
+; Inputs: R10 - Raw captured timer count difference
+; Outputs: R10 - Calculated frequency
+;-------------------------------------------------------------------------------
+calculate_freq
+               clrc                ; Clear carry flag
+               rrc R10             ; Divide R10 by 2 (right shift)
+               clrc                ; Clear carry flag
+               rrc R10             ; Divide R10 by 2 again (total division by 4)
+               DIV16bit #0x8000, R10, R10, nouse  ; Divide by 32768 (for scaling)
+               ret
+
+;-------------------------------------------------------------------------------
+; Function: print_freq
+; Description: Displays the frequency value on LCD
+; Inputs: R10 - Frequency value to display
+; Outputs: None
+;-------------------------------------------------------------------------------
+print_freq  mov.b      #5,R14      ; 5 digit result to display
+get_nums    DIV16bit   R10,#0x0A,R15,R13  ; Divide by 10 to get rightmost digit
+            add.w      #48,R13     ; Convert to ASCII
+            mov.w      R15,R10     ; R10 = quotient (for next iteration)
+            LCD_data   R13         ; Display digit
+            call       #cursorleft ; Move cursor left for next digit
+            call       #cursorleft
+            DEC.B      R14         ; Decrement digit counter
+            jnz        get_nums    ; Continue for all 5 digits
+            call       #cur_units_T2 ; Reset cursor position to units place
+            ret
+           
+;-------------------------------------------------------------------------------
+; Function: PORT2_ISR
+; Description: Interrupt service routine for push buttons
+; Inputs: None (reads interrupt flags)
+; Outputs: state - Updated based on button pressed
+;-------------------------------------------------------------------------------
+PORT2_ISR    push   #DebounceVal   ; Debounce delay
+             call   #Delay
+             bit.b  #0x01,PBIntFlag ; Check if PB0 was pushed (P2.0)
+             jnz    LCD            ; Jump to LCD handler if set
+             bit.b  #0x02,PBIntFlag ; Check if PB1 was pushed (P2.1)
+             jnz    COUNTER        ; Jump to counter handler if set
+             bit.b  #0x10,PBIntFlag ; Check if PB4 was pushed (P2.4)
+             jnz    PWM            ; Jump to PWM handler if set
+             reti                  ; Return if no matching interrupt
+             
+LCD          mov    #1,state       ; Set state to 1 (one-minute countdown)
+             call   #NewCount      ; Initialize countdown
+             jmp    exitLPM0       ; Exit low power mode
+             
+COUNTER       cmp    #2,state      ; Check if already in state 2
+              jeq    getout        ; If so, just exit
+              mov    #2,state      ; Otherwise, set state to 2 (frequency measurement)
+              jmp    exitLPM0      ; Exit low power mode
+              
+PWM          cmp    #3,state       ; Check if already in state 3
+             jeq    getout         ; If so, just exit
+             mov    #3,state       ; Otherwise, set state to 3 (PWM generation)
+
+exitLPM0     bic    #CPUOFF,0(SP)  ; Clear CPUOFF bit in saved SR to wake up CPU
+getout       bic.b  #0x0F,PBIntFlag ; Clear all push button interrupt flags
+             reti                  ; Return from interrupt
+             
+;-------------------------------------------------------------------------------
+; Function: TIMER0_ISR
+; Description: Interrupt service routine for Timer A (used in Task 1)
+; Inputs: None
+; Outputs: None
+;-------------------------------------------------------------------------------
+TIMER0_ISR BIC.B  #CPUOFF,0(SP)    ; Wake up CPU from LPM
+           RETI                    ; Return from interrupt
+
+;-------------------------------------------------------------------------------
+; Function: TIMER1_ISR
+; Description: Interrupt service routine for Timer A1 (used in Tasks 2 and 3)
+; Inputs: None
+; Outputs: T0, T1 - Capture values for frequency calculation
+;-------------------------------------------------------------------------------
+TIMER1_ISR  add    Timer_A1_Flag,PC ; Add timer vector value to PC (jump table)
+            reti                    ; Vector 0 - No interrupt
+            reti                    ; Vector 2 - CCR1
+            jmp    Task2            ; Vector 4 - CCR2
+            reti                    ; Vector 6 - CCR3
+            reti                    ; Vector 8 - CCR4
+            reti                    ; Vector 10 - CCR5
+            reti                    ; Vector 12 - CCR6
+            reti                    ; Vector 14 - Timer overflow
+            
+Task2       bic    #CCIE+CCIFG+COV,Timer_A1_CC2_Ctl  ; Disable capture interrupt temporarily
+            cmp.b  #0,Flag          ; Check if this is first or second capture
+            jne    cap_2            ; If Flag!=0, this is second capture
+            mov.w  Timer_A1_CC2_Reg,T0  ; Store first capture value in T0 (R11)
+            xor.b  #0x01,Flag       ; Toggle Flag (0->1)
+            bis    #CCIE,Timer_A1_CC2_Ctl  ; Re-enable capture interrupt
+            reti                    ; Return from interrupt
+        
+cap_2       mov.w  Timer_A1_CC2_Reg,T1  ; Store second capture value in T1 (R12)
+            mov.w  T1,R10           ; Copy T1 to R10 for calculation
+            bic    #CCIE,Timer_A1_CC2_Ctl  ; Disable capture interrupt
+            sub    T0,R10           ; Calculate T1-T0 (time difference)
+            JN     NEGATIVE         ; If result negative (timer wrapped), adjust
+            jmp    Done_cap         ; Otherwise, we're done with capture
+
+NEGATIVE    mov   #0xFFFF,R10       ; Handle timer wraparound:
+            sub   T0,R10            ; FFFF-T0 (distance to overflow)
+            add   T1,R10            ; Add T1 (distance from 0 to T1)
+            
+Done_cap    call  #Stop_Timer_A1    ; Stop Timer A1
+            xor.b #0x01,Flag        ; Reset Flag (1->0)
+            bic   #CPUOFF, 0(SP)    ; Wake up CPU from LPM
+            reti                    ; Return from interrupt
+
+;-------------------------------------------------------------------------------
+; Function: Delay
+; Description: General-purpose software delay
+; Stack Parameters:
+;   - Delay count value
+; Outputs: None
+;-------------------------------------------------------------------------------
+Delay         pop   R4              ; Get return address
+              pop   R5              ; Get delay value
+L             dec.w R5              ; Decrement delay counter
+              jnz   L               ; Loop until counter reaches 0
+              push.w  R4            ; Push return address back
+              ret                   ; Return to caller
+
+;------------------------------------------------------------------------------
+            ENDMOD
+            END

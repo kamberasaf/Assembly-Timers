@@ -1,0 +1,77 @@
+;*****************************************************************************
+; File: main.s43 - Main Program for Basic and Advanced Timers Lab
+; Authors: Asaf Kamber, Aviv Primor
+; Course: Introduction to Computers - Lab 5
+; Description: Implements a finite state machine that manages different timer
+;              applications on the MSP430 microcontroller.
+;*****************************************************************************
+#include "bsp.h"
+; already in use: R4,R5,R6,R7,R8,R9,R11,R12,R13,R14,R15 ... R10= freq result
+            NAME   MAIN
+            PUBLIC state,Flag
+            EXTERN SysConfig,delay_ms,OneMinCount,clearLCD,TIMER0_ISR,PWM
+            EXTERN PORT2_ISR,Delay,Delay_halfsec,FreqCount,TIMER1_ISR
+;-------------------------------------------------------------------------------
+; Data Section - Memory allocation for variables
+;-------------------------------------------------------------------------------
+             ;ORG    0x200      ;RAM segment - For MSP430G2xx devices
+             ORG   0x1100       ;RAM segment - For MSP430FG46x (LAB)
+;-------------------------------------------------------------------------------
+state        DW     0           ; Current state in the finite state machine
+Flag         DW     0           ; Flag used for frequency measurement capture sequence
+;-------------------------------------------------------------------------------
+; Code Section
+;-------------------------------------------------------------------------------
+         ;ORG    0x0C000      ;Code segment - For MSP430G2xx devices
+         RSEG   CSTACK        ; C stack segment
+         RSEG   CODE          ; Code segment
+;-------------------------------------------------------------------------------
+; Main program entry point
+;-------------------------------------------------------------------------------
+MAIN     mov.w  #SFE(CSTACK),SP  ; Initialize stack pointer
+         mov    #0,state          ; Initialize state to 0 (idle)
+STOP     mov.w  #WDTPW+WDTHOLD,&WDTCTL  ; Stop watchdog timer
+         call   #SysConfig        ; Initialize system configuration
+         call   #clearLCD         ; Clear LCD display
+;-------------------------------------------------------------------------------
+; Finite State Machine implementation
+;-------------------------------------------------------------------------------
+state0   cmp    #0,state          ; Check if in state 0 (idle)
+         jnz    state1            ; If not, check for state 1
+         call   #clearLCD         ; Clear LCD display in idle state
+         bis.w  #LPM0+GIE,SR      ; Enter low power mode with interrupts enabled
+
+state1   cmp    #1,state          ; Check if in state 1 (one-minute countdown)
+         jne    state2            ; If not, check for state 2
+         call   #OneMinCount      ; Execute one-minute countdown task
+         jmp    state0            ; Return to idle state when done
+         
+state2   cmp    #2,state          ; Check if in state 2 (frequency measurement)
+         jne    state3            ; If not, check for state 3
+         call   #FreqCount        ; Execute frequency measurement task
+         jmp    state0            ; Return to idle state when done
+
+state3   cmp    #3,state          ; Check if in state 3 (PWM generation)
+         jne    state0            ; If not, return to idle state
+         call   #PWM              ; Execute PWM generation task
+         jmp    state0            ; Return to idle state when done
+         
+;-------------------------------------------------------------------------------
+; Interrupt Vector Table
+;-------------------------------------------------------------------------------
+         COMMON INTVEC           ; Common interrupt vectors segment
+;-------------------------------------------------------------------------------
+         ORG    PORT2_VECTOR     ; Port 2 interrupt vector
+         DW     PORT2_ISR        ; Push button ISR
+         
+         ;ORG    TIMER0_A0_VECTOR  ; Timer A0 ISR - For MSP430G2xx devices
+         ORG   TIMERA0_VECTOR    ; Timer A ISR - For MSP430FG46x
+         DW     TIMER0_ISR
+         
+         ;ORG    TIMER1_A1_VECTOR  ; Timer A1 ISR - For MSP430G2xx devices
+         ORG   TIMERB1_VECTOR    ; Timer B ISR - For MSP430FG46x
+         DW     TIMER1_ISR
+         
+         ORG    RESET_VECTOR     ; MSP430 reset vector
+         DW     MAIN             ; Main program entry point
+         END

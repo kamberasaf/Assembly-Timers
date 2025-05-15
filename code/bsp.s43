@@ -1,0 +1,116 @@
+;*****************************************************************************
+; File: bsp.s43 - Board Support Package for Basic and Advanced Timers Lab
+; Authors: Asaf Kamber, Aviv Primor
+; Course: Introduction to Computers - Lab 5
+; Description: Hardware configuration and timer setup for the MSP430 microcontroller,
+;              including GPIO, LCD, and timer initialization.
+;*****************************************************************************
+#include "bsp.h"
+;------------------------------------------------------------------------------
+; already in use: R4,R5,R6,R7,R8,R9,R11,R12,R13,R14,R15 ... R10= freq result
+           MODULE BSP
+           PUBLIC GPIOconfig,Timer_A1_Setup,Stop_Timer_A1,onesecdelay,Stop_Timer_A0
+           PUBLIC Timer_A1_Setup_3,state3delay
+           EXTERN Delay,delay_ms,delay200usec,LCD_START
+          
+           RSEG CODE
+;-------------------------------------------------------------------------------           
+; Function: GPIOconfig
+; Description: Configures GPIO ports for push buttons, LCD, and timer functions
+; Inputs: None
+; Outputs: None
+;-------------------------------------------------------------------------------
+GPIOconfig
+          ;----- Push Buttons Configuration -----
+          BIC.B    #0xF7,PBSEL     ; Clear bits 0,1,4 for GPIO use (1110-0111)
+          BIC.B    #0x13,PBDIR     ; Set P2.0, P2.1, P2.4 as inputs (push buttons)
+          BIS.B    #0x03,PBEdgeT   ; Set P2.0-P2.1 for rising edge trigger
+          BIC.B    #0x10,PBEdgeT   ; Set P2.4 for falling edge trigger
+          BIS.B    #0x13,PBIntEn   ; Enable interrupts for P2.0, P2.1, P2.4
+          BIC.B    #0xFF,PBIntFlag ; Clear all interrupt flags
+          
+          ;----- LCD Configuration -----
+          BIC.B    #0xFF,LCData    ; Clear LCD data port
+          BIC.B    #0xFF,LCData_SEL ; Configure P1 as GPIO (not peripheral)
+          BIS.B    #0xFF,LCData_DIR ; Set P1 as output for LCD data
+          BIC.B    #0xE0,LCDCtrl_SEL ; Configure P2.5-P2.7 as GPIO for LCD control
+          BIS.B    #0xE0,LCDCtrl_DIR ; Set P2.5-P2.7 as outputs for LCD control
+          BIC.B    #0xE0,LCDCtrl    ; Clear LCD control lines
+          CALL     #LCD_START       ; Initialize LCD
+          
+          ;----- Timer Input/Output Configuration -----
+          BIS.B   #TB_CLOCK,PBSEL  ; P2.3 SEL=1 for Timer B clock/capture input
+          BIS.B   #2,PBSEL         ; P2.2 SEL=1 for Timer B output
+          BIS.B   #2,PBDIR         ; P2.2 DIR=1 (output for PWM)
+          RET
+
+;-------------------------------------------------------------------------------
+; Function: Timer_A1_Setup
+; Description: Configures Timer A1 (Timer B) for frequency measurement (capture mode)
+; Inputs: None
+; Outputs: None
+;-------------------------------------------------------------------------------
+Timer_A1_Setup    MOV.W   #CM_1+SCS+CAP+CCIE+CCIS_0,Timer_A1_CC2_Ctl  ; Capture rising edges
+                  MOV.W   #TACLR,Timer_A1_Ctl                       ; Clear Timer A
+                  MOV.W   #TASSEL_2+MC_2+ID_3,Timer_A1_Ctl          ; SMCLK, Continuous Mode, Division=8              
+                  MOV.W   #TACLR,Timer_A1_Ctl                       ; Clear Timer A again
+                  RET
+
+;-------------------------------------------------------------------------------
+; Function: Timer_A1_Setup_3
+; Description: Configures Timer A1 (Timer B) for PWM generation (up mode)
+; Inputs: None
+; Outputs: None
+;-------------------------------------------------------------------------------
+Timer_A1_Setup_3  MOV.W   #TACLR,Timer_A1_Ctl                       ; Clear Timer A
+                  MOV.W   #TASSEL_2+MC_1+ID_3,Timer_A1_Ctl          ; SMCLK, Up Mode, Division=8              
+                  MOV.W   #65,Timer_A_CC0_Reg                       ; Period value for PWM (sets frequency)
+                  RET
+                  
+;-------------------------------------------------------------------------------
+; Function: Stop_Timer_A1
+; Description: Stops Timer A1 (Timer B) used for frequency measurement and PWM
+; Inputs: None
+; Outputs: None
+;-------------------------------------------------------------------------------
+Stop_Timer_A1     BIC.W #TASSEL_2+MC_3,Timer_A1_Ctl ; Stop Timer A1 (Task 2 & 3)
+                  RET
+                                
+;-------------------------------------------------------------------------------
+; Function: onesecdelay
+; Description: Creates a precise 1-second delay using Timer A
+; Inputs: None
+; Outputs: None - CPU wakes from LPM when timer expires
+;-------------------------------------------------------------------------------
+onesecdelay  
+             BIS    #CCIE,Timer_A_CC0_Ctl          ; Enable compare interrupt
+             MOV.W  #0xFFFE,Timer_A_CC0_Reg        ; Set maximum compare value
+             BIS.W  #TASSEL_2+MC_3+ID_3,Timer_A_Ctl ; SMCLK, UP/DOWN MODE, div=8
+             BIS.W  #CPUOFF+GIE,SR                 ; Enter LPM with interrupts
+             RET   
+
+;-------------------------------------------------------------------------------
+; Function: state3delay
+; Description: Creates a 0.75-second delay for PWM duty cycle changes
+; Inputs: None
+; Outputs: None - CPU wakes from LPM when timer expires
+;-------------------------------------------------------------------------------
+state3delay 
+             BIS    #CCIE,Timer_A_CC0_Ctl          ; Enable compare interrupt
+             MOV.W  #0xC000,Timer_A_CC0_Reg        ; Set to 75% of max for 0.75 sec delay
+             BIS.W  #TASSEL_2+MC_3+ID_3,Timer_A_Ctl ; SMCLK, UP/DOWN MODE, div=8
+             BIS.W  #CPUOFF+GIE,SR                 ; Enter LPM with interrupts
+             RET
+             
+;-------------------------------------------------------------------------------
+; Function: Stop_Timer_A0
+; Description: Stops Timer A used for delays
+; Inputs: None
+; Outputs: None
+;-------------------------------------------------------------------------------
+Stop_Timer_A0     BIC.W #TASSEL_2+MC_3,Timer_A_Ctl  ; Stop Timer (Task 1) 
+                  BIC   #CCIE,Timer_A_CC0_Ctl       ; Disable Timer A compare interrupt
+                  RET
+                  
+                  ENDMOD
+                  END

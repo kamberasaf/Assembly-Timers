@@ -1,0 +1,93 @@
+;*****************************************************************************
+; File: api.s43 - API Layer for Basic and Advanced Timers Lab
+; Authors: Asaf Kamber, Aviv Primor
+; Course: Introduction to Computers - Lab 5
+; Description: Application Programming Interface implementing higher-level
+;              timer applications: frequency counting, one-minute countdown, and PWM.
+;*****************************************************************************
+#include "bsp.h"
+; already in use: R4,R5,R6,R7,R8,R9,R11,R12,R13,R14,R15 ... R10= freq result
+           MODULE API
+           PUBLIC FreqCount,OneMinCount,PWM
+           EXTERN Delay_halfsec,state,PrintLEDS,delay_ms,task2_title
+           EXTERN print_freq,calculate_freq,state,clearLCD,Timer_A1_Setup_3
+           EXTERN Timer_A1_Setup,cur_units_T2,StartCount,LCD_START
+           EXTERN StartTitleT1,onesecdelay,NewCount,Stop_Timer_A1,state3delay
+;------------------------------------------------------------------------------        
+           ;RSEG   CODE
+           ORG    0x200      ; RAM segment - Duty cycle lookup table
+DutyCycle  DW 0,6,13,19,26,32,39,45,52,58,65  ; PWM duty cycle values (0-100%)
+length     DW 11             ; Number of duty cycle values
+
+           RSEG   CODE       ; Code segment
+;-------------------------------------------------------------------------------
+; Function: OneMinCount - Task 1
+; Description: Implements a one-minute countdown timer displayed on LCD
+; Inputs: None
+; Outputs: state - Set to 0 to return to idle state
+;-------------------------------------------------------------------------------
+OneMinCount  
+           call #LCD_START   ; Initialize LCD display
+           call #NewCount    ; Setup new countdown (initialize to 01:00)
+           call #StartCount  ; Begin countdown process with timer
+           cmp  #1,state     ; Check if still in state 1
+           jne  goout        ; If not, exit
+           mov  #0,state     ; Return to idle state
+goout      ret               ; Return to caller
+
+;-------------------------------------------------------------------------------
+; Function: FreqCount - Task 2
+; Description: Measures the frequency of an input signal and displays on LCD
+; Inputs: None
+; Outputs: state - Set to 0 to return to idle state
+;-------------------------------------------------------------------------------
+FreqCount  call #LCD_START   ; Initialize LCD display
+           call #task2_title ; Display "Measured frequency: [Hz]" title
+           call #Timer_A1_Setup ; Configure timer for capture mode
+task2_loop cmp  #2,state     ; Check if still in state 2
+           JNE  exit_state   ; If not, exit
+           
+           ; Configure timer for frequency measurement
+           MOV.W  #TASSEL_2+MC_2+ID_3,Timer_A1_Ctl      ; SMCLK, continuous mode, div=8
+           MOV.W  #CM_1+SCS+CAP+CCIE+CCIS_0,Timer_A1_CC2_Ctl ; Capture rising edges with interrupt
+           
+           bis  #CPUOFF+GIE,SR ; Enter low power mode with interrupts
+           
+           ; Process captured frequency
+           call #cur_units_T2  ; Position cursor for frequency display
+           call #calculate_freq ; Calculate frequency from timer captures
+           call #cur_units_T2  ; Reposition cursor
+           call #print_freq    ; Display frequency on LCD
+           jmp  task2_loop     ; Continue measuring frequency
+           
+exit_state call #Stop_Timer_A1 ; Stop timer
+           call #clearLCD      ; Clear LCD display
+           ret                 ; Return to caller
+
+;-------------------------------------------------------------------------------
+; Function: PWM - Task 3
+; Description: Generates PWM signal with varying duty cycle
+; Inputs: None
+; Outputs: state - Set to 0 to return to idle state
+;-------------------------------------------------------------------------------
+PWM        
+Task3Loop  MOV     DutyCycle,R7 ; Get pointer to duty cycle array
+           MOV.B   length,R6    ; Get number of duty cycle values
+RUN_DC     CMP     #3,state     ; Check if still in state 3
+           JNE     out          ; If not, exit
+           
+           CALL    #Timer_A1_Setup_3 ; Configure timer for PWM generation (2KHz, UP Mode)
+           MOV.W   #CCIE+OUTMOD_7,Timer_A1_CC2_Ctl ; Set PWM output mode (reset/set)
+           MOV.W   @R7+,Timer_A1_CC2_Reg ; Set duty cycle value from array
+           
+           call    #state3delay ; Delay 0.75 seconds between duty cycle changes
+           
+           DEC     R6           ; Decrement array index counter
+           CMP     #0,R6        ; Check if reached end of array
+           JEQ     Task3Loop    ; If end reached, restart from beginning
+           JMP     RUN_DC       ; Continue with next duty cycle value
+           
+out        CALL #Stop_Timer_A1  ; Stop timer
+           RET                  ; Return to caller
+           ENDMOD
+           END
